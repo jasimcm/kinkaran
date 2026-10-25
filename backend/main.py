@@ -14,9 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # so "import store" wo
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import bot
 import parser as bill_parser
@@ -32,6 +33,9 @@ log = logging.getLogger("easybill")
 
 @asynccontextmanager
 async def lifespan(app):
+    stale = store.fail_stale_sends()
+    if stale:
+        log.warning("WhatsApp countdowns lost in the restart, marked failed: %s", ", ".join(stale))
     telegram_app = None
     try:
         telegram_app = await bot.start_bot()
@@ -44,17 +48,61 @@ async def lifespan(app):
 app = FastAPI(title="Easy Bill", lifespan=lifespan)
 
 
+# ---------------------------------------------------------------- Who may use the API
+#
+# On this Mac (localhost) everything works without a key: the counter screen, scripts.
+# Through the public tunnel, only customer links (/share/…) and Meta's webhook are open;
+# the API needs ACCESS_KEY. Open https://<tunnel>/?key=<ACCESS_KEY> once on the shop phone
+# and it remembers the key in a cookie.
+
+PROTECTED = ("/api/", "/docs", "/redoc", "/openapi.json")
+TUNNEL_HEADERS = ("cf-connecting-ip", "cf-ray", "x-forwarded-for", "x-real-ip")  # added by the tunnel
+KEY_COOKIE = "easybill_key"
+
+
+def is_local(request):
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1") and not any(header in request.headers for header in TUNNEL_HEADERS)
+
+
+def has_key(request, key):
+    return bool(store.ACCESS_KEY and key and secrets.compare_digest(key, store.ACCESS_KEY))
+
+
+@app.middleware("http")
+async def access_control(request: Request, call_next):
+    key_in_url = request.query_params.get("key")
+    if key_in_url is not None and not request.url.path.startswith(PROTECTED):
+        if not has_key(request, key_in_url):
+            return JSONResponse({"detail": "Wrong key"}, status_code=403)
+        response = RedirectResponse(request.url.path, status_code=303)  # drop the key from the address bar
+        response.set_cookie(KEY_COOKIE, key_in_url, max_age=365 * 86400, httponly=True,
+                            samesite="strict", secure=not is_local(request))
+        return response
+    if (request.url.path.startswith(PROTECTED) and not is_local(request)
+            and not has_key(request, request.cookies.get(KEY_COOKIE) or request.headers.get("x-access-key"))):
+        return JSONResponse({"detail": "Not allowed from outside this Mac without the access key"}, status_code=403)
+    return await call_next(request)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, error: RequestValidationError):
+    """Say what was wrong without echoing the input back (a NaN can't even be sent as JSON)."""
+    problems = [{"loc": list(problem["loc"]), "msg": problem["msg"]} for problem in error.errors()]
+    return JSONResponse({"detail": problems}, status_code=422)
+
+
 class ParseRequest(BaseModel):
-    transcript: str
+    transcript: str = Field(max_length=2000)
 
 
 class BillItem(BaseModel):
-    item_id: str
-    qty: float
+    item_id: str = Field(max_length=100)
+    qty: float = Field(gt=0, le=10000, allow_inf_nan=False)  # NaN/inf would break bills.json
 
 
 class BillRequest(BaseModel):
-    items: List[BillItem]
+    items: List[BillItem] = Field(max_length=200)
 
 
 @app.get("/api/inventory")
@@ -86,7 +134,7 @@ def create_bill(request: BillRequest):
     for entry in request.items:
         if entry.item_id not in store.INVENTORY_BY_ID:
             raise HTTPException(400, f"Unknown item: {entry.item_id}")
-    lines, total = store.price_items([entry.dict() for entry in request.items])
+    lines, total = store.price_items([entry.model_dump() for entry in request.items])
     if not lines:
         raise HTTPException(400, "The bill has no items.")
     bill = store.create_bill(lines, total)
@@ -171,11 +219,12 @@ def whatsapp_verify(
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request, background: BackgroundTasks):
     """Meta sends every incoming message here. Reply 200 at once; the work runs in the background."""
+    if not whatsapp.enabled():  # the WhatsApp Cloud API bot is not set up: ignore
+        return {"ok": True}
     body = await request.body()
     if not whatsapp.signature_ok(body, request.headers.get("X-Hub-Signature-256")):
         raise HTTPException(403, "Bad signature")
-    if whatsapp.enabled():
-        background.add_task(whatsapp.handle_webhook, json.loads(body))
+    background.add_task(whatsapp.handle_webhook, json.loads(body))
     return {"ok": True}
 
 

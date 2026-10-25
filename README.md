@@ -33,7 +33,7 @@ Track: *Kill the Busywork*. Code name: **Easy Bill** — the Telegram bot is **@
                                                                            ├─ ReportLab 80mm receipt → Preview / printer
                                                                            ├─ counter.html: bill + UPI QR + Telegram QR
                                                                            └─ replies with summary + PDF
- Customer scans Telegram QR (t.me/<bot>?start=EB-0042) → taps Start → bot sends the PDF
+ Customer scans Telegram QR (t.me/<bot>?start=EB-0042_<key>) → taps Start → bot sends the PDF
 ```
 
 The Mac asks Telegram for new messages ("long polling"), so **no webhook, tunnel or public URL is needed**.
@@ -61,8 +61,9 @@ Full setup walkthrough (BotFather, Gemini key, printer, WhatsApp): [Setup](#setu
   fallback parser; prices always from `inventory.json` (Gemini never sets a price); 80mm PDF receipts;
   customer gets the bill via Telegram deep-link QR or WhatsApp (`wa.me` message, or hands-free
   auto-send through a linked spare number); counter screen with UPI payment QR; web mic page.
-- **Known limitations:** single shop, JSON storage; anyone who finds the bot can bill; UPI payment is
-  not verified; PDF and bill endpoints are unauthenticated (see [Limits](#limits-of-this-mockup)).
+- **Known limitations:** single shop, JSON storage; UPI payment is not verified
+  (see [Limits](#limits-of-this-mockup)). Only `SHOPKEEPER_IDS` can use the bot, and the API needs
+  `ACCESS_KEY` from outside the Mac (see [Security](#security)).
 - **Libraries, APIs, datasets:** [FastAPI](https://fastapi.tiangolo.com),
   [python-telegram-bot](https://python-telegram-bot.org), [Gemini API](https://ai.google.dev),
   [ReportLab](https://www.reportlab.com), [rapidfuzz](https://github.com/rapidfuzz/RapidFuzz),
@@ -269,7 +270,7 @@ Prices and items are in `backend/inventory.json`. Edit them and restart.
   the bot lists it under **⚠️ Not in price list (not billed)** so the shopkeeper can add it to `inventory.json`.
   Packet and piece items are always whole numbers.
 - **Getting the bill to the customer:** a Telegram bot can't message someone who hasn't started a chat with it.
-  So the counter screen shows `https://t.me/<bot>?start=EB-0042`. The customer taps **Start**, which sends
+  So the counter screen shows `https://t.me/<bot>?start=EB-0042_<key>`. The customer taps **Start**, which sends
   `/start EB-0042`, and the bot replies with the PDF. The bot also gives the shopkeeper this link to forward.
 - **PDF:** ReportLab, 80mm receipt. Item names are in English because ReportLab can't shape Malayalam text.
   Malayalam names appear on the screens.
@@ -339,12 +340,44 @@ than Telegram:
 6. **Permanent token:** business.facebook.com → Settings → System users → generate a token that never expires,
    with `whatsapp_business_messaging` and `whatsapp_business_management`.
 
-On WhatsApp the counter screen shows a `wa.me` QR. The customer sends "BILL EB-0042" and gets the PDF.
+On WhatsApp the counter screen shows a `wa.me` QR. The customer sends "BILL EB-0042 <key>" and gets the PDF.
+The Cloud API bot needs `WHATSAPP_APP_SECRET` (webhook signatures are always checked), and only numbers in
+`WHATSAPP_SHOPKEEPERS` can make bills or see reports.
+
+## Security
+
+| Who | Can do |
+|---|---|
+| Telegram users in `SHOPKEEPER_IDS` | Everything: bill, print, reports, change prices, send on WhatsApp |
+| Anyone else on Telegram (customers) | Only open their own bill with the counter-screen QR (`/start EB-0042_<key>`), and `/myid` |
+| This Mac (localhost) | The whole API and screens, no key needed |
+| Through the tunnel, with `ACCESS_KEY` | The API (the mic page on the shop phone) |
+| Through the tunnel, without the key | Only customer PDF links `/share/EB-0042/<key>`, the static screens (no data) and Meta's webhook |
+
+**First run:** start the bot and send it `/myid` (or any message). It replies with your Telegram ID. Put it in
+`.env` as `SHOPKEEPER_IDS=123456789` (several people: `123,456`) and restart.
+
+**Mic page on the shop phone:** set `ACCESS_KEY` to a long random word (e.g. `openssl rand -hex 16`), then open
+`https://<tunnel>/?key=<ACCESS_KEY>` once. The phone remembers it; the key disappears from the address bar.
+
+Every customer link (Telegram, WhatsApp, PDF) carries the bill's random key, so bills can't be fetched by
+guessing numbers. Item names are escaped on the screens, and quantities must be real numbers (no NaN).
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests -q
+```
+
+137 tests run offline in a few seconds, and on every push through GitHub Actions
+(`.github/workflows/tests.yml`, Python 3.9 and 3.12). Telegram, Gemini and WhatsApp are faked, and every test uses a
+temporary copy of the bills and price list, so nothing real is sent, billed or printed.
 
 ## Limits of this mockup
 - **Storage:** one shop, one price list, bills in a JSON file.
 - **Who can bill:** anyone who sends items to the bot creates a bill. A real version would only accept the
   shopkeeper's Telegram account.
 - **Payment:** "Paid via UPI" is printed on the bill, but the app doesn't check that the payment arrived.
-- **Public tunnel:** while a tunnel is running, the whole server is reachable from the internet. Anyone who
-  has the tunnel URL can open bills by number at `/api/bills/EB-0001/pdf`. A real version needs logins.
+- **One access key:** the API through the tunnel is protected by a single shared `ACCESS_KEY`, not per-user
+  logins. Keep it secret, and change it if a phone is lost.

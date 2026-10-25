@@ -27,7 +27,12 @@ import store
 log = logging.getLogger("easybill.whatsapp")
 
 GRAPH_URL = f"https://graph.facebook.com/{store.WHATSAPP_API_VERSION}"
-BILL_REQUEST = re.compile(r"\bBILL\s*(EB-\d+)", re.IGNORECASE)
+# "BILL EB-0042 <key>" from the counter QR; the key stops people fetching bills by guessing numbers
+BILL_REQUEST = re.compile(r"\bBILL\s*(EB-\d+)(?:\s+([A-Za-z0-9_-]+))?", re.IGNORECASE)
+CUSTOMER_HELP = (
+    "നമസ്കാരം! 🙏 {shop}\n"
+    "Customers: scan the WhatsApp QR at the counter to get your bill."
+)
 
 HELP = (
     "നമസ്കാരം! 🙏 {shop}\n\n"
@@ -44,13 +49,18 @@ _seen_message_ids = set()  # Meta can deliver the same webhook twice
 
 
 def enabled():
-    return bool(store.WHATSAPP_TOKEN and store.WHATSAPP_PHONE_NUMBER_ID)
+    """The Cloud API bot needs the app secret too: without it anyone could forge webhook calls."""
+    return bool(store.WHATSAPP_TOKEN and store.WHATSAPP_PHONE_NUMBER_ID and store.WHATSAPP_APP_SECRET)
+
+
+def is_shopkeeper(sender):
+    return sender in store.WHATSAPP_SHOPKEEPERS
 
 
 def signature_ok(body, signature_header):
-    """Check Meta's X-Hub-Signature-256 header (only if WHATSAPP_APP_SECRET is set)."""
+    """Check Meta's X-Hub-Signature-256 header. No app secret = nothing is trusted."""
     if not store.WHATSAPP_APP_SECRET:
-        return True
+        return False
     expected = "sha256=" + hmac.new(store.WHATSAPP_APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature_header or "")
 
@@ -144,7 +154,10 @@ async def handle_message(message):
         text = message["text"]["body"]
         request = BILL_REQUEST.search(text)
         if request:
-            await send_bill_to_customer(sender, request.group(1).upper())
+            await send_bill_to_customer(sender, request.group(1).upper(), request.group(2))
+            return
+        if not is_shopkeeper(sender):  # only the shop's own numbers can bill or see reports
+            await send_text(sender, CUSTOMER_HELP.format(shop=store.SHOP_NAME))
             return
         if bill_parser.is_greeting(text):  # don't spend a Gemini request on "hi"
             await send_text(sender, HELP.format(shop=store.SHOP_NAME))
@@ -156,10 +169,13 @@ async def handle_message(message):
         text_without_phone, _ = bill_parser.split_phone(text)
         items, _, _ = await asyncio.to_thread(bill_parser.parse, text_without_phone)
     elif kind == "audio":
+        if not is_shopkeeper(sender):
+            await send_text(sender, CUSTOMER_HELP.format(shop=store.SHOP_NAME))
+            return
         audio, mime_type = await download_media(message["audio"]["id"])
         transcript, items, _, _ = await asyncio.to_thread(bill_parser.parse_audio, audio, mime_type)
     else:
-        await send_text(sender, HELP.format(shop=store.SHOP_NAME))
+        await send_text(sender, HELP.format(shop=store.SHOP_NAME) if is_shopkeeper(sender) else CUSTOMER_HELP.format(shop=store.SHOP_NAME))
         return
 
     if not items:
@@ -179,8 +195,8 @@ async def handle_message(message):
     await send_pdf(sender, bill)
 
 
-async def send_bill_to_customer(to, bill_id):
-    bill = store.get_bill(bill_id)
+async def send_bill_to_customer(to, bill_id, key):
+    bill = store.bill_for_customer(bill_id, key)
     if bill is None:
         await send_text(to, f"ക്ഷമിക്കണം, {bill_id} എന്ന ബിൽ കണ്ടെത്താനായില്ല.\nSorry, we could not find bill {bill_id}.")
         return

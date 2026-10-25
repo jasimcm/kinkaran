@@ -9,6 +9,11 @@ let shownDelivered = null;
 let shownSend = null;
 let countdownTimer = null;
 
+// Item names can be added by photo or voice, so never put them into HTML unescaped.
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
 function rupees(value) {
   return "₹" + Number(value).toFixed(2);
 }
@@ -17,11 +22,11 @@ function drawQr(elementId, text, fallback) {
   const element = $(elementId);
   element.innerHTML = "";
   if (!text) {
-    element.innerHTML = `<p class="qr-fallback">${fallback}</p>`;
+    element.innerHTML = `<p class="qr-fallback">${escapeHtml(fallback)}</p>`;
   } else if (window.QRCode) {
     new QRCode(element, { text, width: 512, height: 512, correctLevel: QRCode.CorrectLevel.M });
   } else {
-    element.innerHTML = `<p class="qr-fallback">${text}</p>`;
+    element.innerHTML = `<p class="qr-fallback">${escapeHtml(text)}</p>`;
   }
 }
 
@@ -35,7 +40,7 @@ function showBill(bill) {
   $("rows").innerHTML = bill.items
     .map((item) => `
       <tr>
-        <td><strong>${item.name_ml}</strong><br><small>${item.name_en}</small></td>
+        <td><strong>${escapeHtml(item.name_ml)}</strong><br><small>${escapeHtml(item.name_en)}</small></td>
         <td>${item.qty} ${UNIT_LABEL[item.unit]}</td>
         <td>${rupees(item.line_total)}</td>
       </tr>`)

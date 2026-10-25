@@ -4,15 +4,20 @@ Long polling means the Mac asks Telegram for new messages: no webhook or tunnel 
 Shopkeeper: sends a voice note (or types the items) to the bot
   -> Gemini transcribes and picks items -> prices from inventory.json
   -> bill saved, printed on the Mac, shown on the counter screen -> bot replies with summary + PDF.
-Customer: scans https://t.me/<bot>?start=<BillID> on the counter screen and taps Start
-  -> Telegram sends "/start EB-0042" -> bot replies with summary + PDF.
+Customer: scans https://t.me/<bot>?start=<BillID>_<key> on the counter screen and taps Start
+  -> Telegram sends "/start EB-0042_<key>" -> bot replies with summary + PDF.
 Bots cannot message people who never started a chat, which is why we use this deep link.
+The key is the bill's random share key, so nobody can fetch other bills by guessing numbers.
+
+Only Telegram users listed in SHOPKEEPER_IDS can bill, print, see reports or change prices.
+Everyone else can only open their own bill with the link above (and /myid shows their id).
 
 If the shopkeeper says a phone number and whatsapp-sender/ is linked, the bill is sent to that
 WhatsApp automatically after a countdown (AUTO_SEND_SECONDS) unless the shopkeeper cancels.
 Otherwise the bot gives a "Send on WhatsApp" button that opens the shopkeeper's WhatsApp.
 """
 import asyncio
+import functools
 import logging
 import math
 import re
@@ -53,6 +58,44 @@ NOT_UNDERSTOOD = (
     "ക്ഷമിക്കണം, സാധനങ്ങൾ മനസ്സിലായില്ല. വീണ്ടും പറയാമോ?\n"
     "Sorry, I couldn't find any items in that. Please try again.\n\nI heard: \"{heard}\""
 )
+CUSTOMER_WELCOME = (
+    "നമസ്കാരം! 🙏 This is the billing assistant of {shop}.\n"
+    "കടയിലെ QR കോഡ് സ്കാൻ ചെയ്താൽ നിങ്ങളുടെ ബിൽ ഇവിടെ ലഭിക്കും.\n"
+    "Scan the QR at the shop counter to get your bill here."
+)
+NOT_SET_UP = (
+    "⚙️ Shopkeeper setup: no shopkeeper is set yet.\n"
+    "Add this line to .env and restart:\nSHOPKEEPER_IDS={user_id}"
+)
+
+
+def is_shopkeeper(update):
+    user = update.effective_user
+    return user is not None and user.id in store.SHOPKEEPER_IDS
+
+
+def shopkeeper_only(handler):
+    """Billing, printing, reports and price changes are for the shopkeeper only.
+    Customers reach this same bot through the counter QR, so everyone else is turned away."""
+    @functools.wraps(handler)
+    async def guarded(update, context):
+        if is_shopkeeper(update):
+            return await handler(update, context)
+        user_id = update.effective_user.id if update.effective_user else "?"
+        log.warning("Ignored a shopkeeper action from Telegram user %s", user_id)
+        if update.callback_query is not None:
+            await update.callback_query.answer("Only the shopkeeper can do this.")
+            return
+        if store.SHOPKEEPER_IDS:
+            await update.effective_message.reply_text(CUSTOMER_WELCOME.format(shop=store.SHOP_NAME))
+        else:  # first run: tell the owner how to claim the bot
+            await update.effective_message.reply_text(NOT_SET_UP.format(user_id=user_id))
+    return guarded
+
+
+async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/myid: shows your Telegram id, to put in SHOPKEEPER_IDS."""
+    await update.effective_message.reply_text(f"Your Telegram ID: {update.effective_user.id}")
 
 
 async def send_bill(message, bill):
@@ -80,11 +123,17 @@ async def send_day_summary(message):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(WELCOME.format(shop=store.SHOP_NAME))
+        if is_shopkeeper(update):
+            await update.message.reply_text(WELCOME.format(shop=store.SHOP_NAME))
+        elif store.SHOPKEEPER_IDS:
+            await update.message.reply_text(CUSTOMER_WELCOME.format(shop=store.SHOP_NAME))
+        else:
+            await update.message.reply_text(NOT_SET_UP.format(user_id=update.effective_user.id))
         return
 
-    bill_id = context.args[0].upper()
-    bill = store.get_bill(bill_id)
+    bill_id, _, key = context.args[0].partition("_")  # "EB-0042_<key>" from the counter QR
+    bill_id = bill_id.upper()
+    bill = store.bill_for_customer(bill_id, key)
     if bill is None:
         await update.message.reply_text(
             f"ക്ഷമിക്കണം, {bill_id} എന്ന ബിൽ കണ്ടെത്താനായില്ല.\n"
@@ -99,6 +148,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------------------------------------------------- Shopkeeper
 
+STALE_BUTTON = "This message is old or already used. Use the newest message. പുതിയ മെസേജ് ഉപയോഗിക്കൂ."
+
+
+def new_draft_id(context):
+    """Every draft gets a number, put in its buttons, so OK on an old message can't act on a newer one."""
+    context.chat_data["draft_seq"] = context.chat_data.get("draft_seq", 0) + 1
+    return context.chat_data["draft_seq"]
+
+
+def take_pending(context, key, query):
+    """Pop chat_data[key] only if the pressed button ("confirm:bill:7") belongs to it."""
+    pending = context.chat_data.get(key)
+    parts = query.data.split(":")
+    if pending is None or len(parts) < 3 or str(pending["id"]) != parts[2]:
+        return None
+    return context.chat_data.pop(key)
+
+
 def items_preview(items):
     """What the photo/voice note was read as, before anything is added to the price list."""
     rows = ["📋 Found these items — check them:", ""]
@@ -106,30 +173,33 @@ def items_preview(items):
         old = store.INVENTORY_BY_ID.get(item["id"])
         tag = f" (was ₹{old['price']:g})" if old else " 🆕"
         rows.append(f"• {item['name_en']} / {item['name_ml']} — ₹{item['price']:g} per {item['unit']}{tag}")
+    rows += ["", "⚠️ These become your SELLING prices. From a supplier bill, check you aren't using the cost price."]
     return "\n".join(rows)
 
 
 async def offer_items(message, context, items):
     """Preview extracted items and let the shopkeeper confirm before they hit inventory."""
-    context.chat_data["pending_items"] = items
+    draft_id = new_draft_id(context)
+    context.chat_data["pending_items"] = {"id": draft_id, "items": items}
     await message.reply_text(
         items_preview(items) + "\n\nശരിയാണോ? Add them to the price list?",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Add all", callback_data="confirm:items"),
-            InlineKeyboardButton("✋ Cancel", callback_data="discard:items"),
+            InlineKeyboardButton("✅ Add all", callback_data=f"confirm:items:{draft_id}"),
+            InlineKeyboardButton("✋ Cancel", callback_data=f"discard:items:{draft_id}"),
         ]]),
     )
 
 
+@shopkeeper_only
 async def confirm_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    items = context.chat_data.pop("pending_items", None)
+    pending = take_pending(context, "pending_items", query)
     await query.answer()
-    if not items:
-        await query.edit_message_text("Nothing to add — send the photo or list again.")
+    if pending is None:
+        await query.edit_message_text(STALE_BUTTON)
         return
     added, updated = [], []
-    for entry in items:
+    for entry in pending["items"]:
         item, existed = store.add_item(entry)
         (updated if existed else added).append(item["name_en"])
     # the offline parser must see the new names right away, before the next bill
@@ -140,13 +210,18 @@ async def confirm_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"✅ Price list updated: {done}\nYou can bill them right away.")
 
 
+@shopkeeper_only
 async def discard_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    context.chat_data.pop("pending_items", None)
+    if take_pending(context, "pending_items", query) is None:
+        await query.answer()
+        await query.edit_message_text(STALE_BUTTON)
+        return
     await query.answer("Cancelled")
     await query.edit_message_text("✋ Cancelled. Nothing was added.")
 
 
+@shopkeeper_only
 async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A photo of a purchase bill / price list -> extract items -> confirm -> inventory."""
     await update.message.chat.send_action(ChatAction.TYPING)
@@ -187,10 +262,12 @@ async def add_items_text(update, context, text):
     await offer_items(update.message, context, items)
 
 
+@shopkeeper_only
 async def add_items_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await add_items_text(update, context, " ".join(context.args))
 
 
+@shopkeeper_only
 async def voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     audio = update.message.voice or update.message.audio
     await update.message.reply_text("🎙️ കേൾക്കുന്നു… Listening…")
@@ -249,6 +326,7 @@ async def download_voice(audio, attempts=2):
                 raise
 
 
+@shopkeeper_only
 async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if bill_parser.is_greeting(text):  # don't spend a Gemini request on "hi"
@@ -298,16 +376,19 @@ async def make_bill(update, context, transcript, items, phone, unknown, icon):
             await update.message.reply_text(NOT_UNDERSTOOD.format(heard=transcript) + not_in_list)
         return
     lines, total = store.price_items(items)
+    phone = phone or context.chat_data.pop("next_phone", None)  # a number said before the items
+    draft_id = new_draft_id(context)
     context.chat_data["pending_draft"] = {  # nothing is billed until ✅ OK is tapped
-        "lines": lines, "total": total, "transcript": transcript, "customer_phone": phone,
+        "id": draft_id, "lines": lines, "total": total, "transcript": transcript, "customer_phone": phone,
     }
     log.info("Draft for chat %s: %d items, ₹%.2f", update.effective_chat.id, len(lines), total)
+    for_customer = f"\n📲 For {store.format_phone(phone)}" if phone else ""
     await update.message.reply_text(
-        f"{icon} \"{transcript}\"\n\n{draft_text(lines, total)}{not_in_list}\n\n"
+        f"{icon} \"{transcript}\"\n\n{draft_text(lines, total)}{for_customer}{not_in_list}\n\n"
         "ശരിയാണോ? Correct? Tap OK to make the bill.",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ OK — bill it", callback_data="confirm:bill"),
-            InlineKeyboardButton("✋ Cancel", callback_data="discard:bill"),
+            InlineKeyboardButton("✅ OK — bill it", callback_data=f"confirm:bill:{draft_id}"),
+            InlineKeyboardButton("✋ Cancel", callback_data=f"discard:bill:{draft_id}"),
         ]]),
     )
 
@@ -340,20 +421,25 @@ async def finish_bill(message, context, draft):
     await deliver_to_customer(message, context, bill)
 
 
+@shopkeeper_only
 async def confirm_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    draft = context.chat_data.pop("pending_draft", None)
+    draft = take_pending(context, "pending_draft", query)
     await query.answer()
-    if draft is None:
-        await query.edit_message_text("Nothing to confirm — send the items again.")
+    if draft is None:  # already billed, or a newer draft replaced this one
+        await query.edit_message_text(STALE_BUTTON)
         return
     await query.edit_message_text(query.message.text + "\n\n✅ Confirmed")
     await finish_bill(query.message, context, draft)
 
 
+@shopkeeper_only
 async def discard_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    context.chat_data.pop("pending_draft", None)
+    if take_pending(context, "pending_draft", query) is None:
+        await query.answer()
+        await query.edit_message_text(STALE_BUTTON)
+        return
     await query.answer("Cancelled")
     await query.edit_message_text("✋ Discarded. ബിൽ ഉണ്ടായില്ല.\nSend the items again.")
 
@@ -368,18 +454,26 @@ async def confirm_by_message(update, context):
 
 
 async def attach_phone(update, context, phone, bill_id=None):
-    """A message with a phone number: add it to the named bill, else this chat's last bill
-    (or replace the old number)."""
+    """A message with only a phone number. It belongs to:
+    - the bill named in the message ("EB-0042 98470 12345"), or
+    - the last bill, if that bill has no customer yet or its WhatsApp send is still counting
+      down (then it's a correction), or else
+    - the NEXT bill: the last customer is done, so this is the next customer's number.
+      (Never overwrite a finished bill's customer: their bill would go to someone else.)"""
     if bill_id is None:
-        bill_id = context.chat_data.get("last_bill_id")
-    if bill_id is None:  # e.g. after a server restart: use the newest Telegram bill
-        latest = store.latest_bill()
-        bill_id = latest["bill_id"] if latest and latest["channel"] == "telegram" else None
-    if bill_id is None:
-        await update.message.reply_text(
-            f"📲 {store.format_phone(phone)}: ആദ്യം സാധനങ്ങൾ പറയൂ. Send the items first, then the number."
-        )
-        return
+        last_id = context.chat_data.get("last_bill_id")
+        if last_id is None:  # e.g. after a server restart: use the newest Telegram bill
+            latest = store.latest_bill()
+            last_id = latest["bill_id"] if latest and latest["channel"] == "telegram" else None
+        last = store.get_bill(last_id) if last_id else None
+        if last is None or (last.get("customer_phone") and last_id not in PENDING):
+            context.chat_data["next_phone"] = phone
+            hint = f"\n(To change {last_id}'s number, send \"{last_id} {phone[2:]}\".)" if last else ""
+            await update.message.reply_text(
+                f"📲 {store.format_phone(phone)}: noted for the next bill. ഇനി സാധനങ്ങൾ പറയൂ.{hint}"
+            )
+            return
+        bill_id = last_id
     if store.get_bill(bill_id) is None:
         await update.message.reply_text(f"Couldn't find bill {bill_id}. {bill_id} കണ്ടെത്താനായില്ല.")
         return
@@ -428,6 +522,7 @@ async def deliver_to_customer(message, context, bill):
 # ---------------------------------------------------------------- WhatsApp auto-send with countdown
 
 PENDING = {}  # bill_id -> (countdown task, the Telegram status message)
+_last_send_started = 0.0  # time.time() of the latest WhatsApp send, for the minimum gap
 
 
 def auto_send_paused():
@@ -443,16 +538,20 @@ def auto_send_paused():
 
 
 def seconds_until_allowed():
-    """Keep at least WA_MIN_GAP_SECONDS between two WhatsApp sends (+1 s: send times are whole seconds)."""
+    """Keep at least WA_MIN_GAP_SECONDS between two WhatsApp sends (+1 s: saved send times are
+    whole seconds). Counts sends saved in bills.json and the one just started in this process."""
+    if store.WA_MIN_GAP_SECONDS <= 0:
+        return 0
     times = store.whatsapp_send_times()
-    return max(0, math.ceil(store.WA_MIN_GAP_SECONDS + 1 - (time.time() - times[-1]))) if times else 0
+    last = max(times[-1] if times else 0, _last_send_started)
+    return max(0, math.ceil(store.WA_MIN_GAP_SECONDS + 1 - (time.time() - last))) if last else 0
 
 
 async def start_countdown(message, context, bill):
-    old_status = cancel_send(context.chat_data.get("pending_send"))  # a new number replaces the old countdown
-    if old_status:
-        await old_status.edit_text("↪️ Number changed: not sent to this one. See below.")
     bill_id = bill["bill_id"]
+    old_status = cancel_send(bill_id)  # a corrected number for THIS bill replaces its countdown
+    if old_status:                     # (other bills' countdowns keep running)
+        await old_status.edit_text("↪️ Number changed: not sent to this one. See below.")
     seconds = max(store.AUTO_SEND_SECONDS, seconds_until_allowed())
     phone = store.format_phone(bill["customer_phone"])
     status = await message.reply_text(
@@ -468,13 +567,21 @@ async def start_countdown(message, context, bill):
 
 
 async def send_after(bill_id, seconds, status):
+    global _last_send_started
     await asyncio.sleep(seconds)  # cancel_send() stops the task here
+    while seconds_until_allowed():  # two countdowns ending together still send a gap apart
+        await asyncio.sleep(seconds_until_allowed())
+    _last_send_started = time.time()  # no await between the check and this line
     PENDING.pop(bill_id, None)
     try:
         await send_now(bill_id, status)
-    except Exception:  # a background task has no error handler: log it, don't lose it
+    except Exception as error:  # a background task has no error handler: log it, don't lose it
         log.exception("Auto-send of %s failed", bill_id)
         store.set_send_status(bill_id, "failed")
+        try:
+            await status.edit_text(f"❌ {bill_id} not sent on WhatsApp: {error}")
+        except Exception:
+            pass
 
 
 async def send_now(bill_id, status):
@@ -512,6 +619,7 @@ def cancel_send(bill_id):
 CANCELLED = "✋ {bill_id} not sent. റദ്ദാക്കി.\nSend the right number to send it again."
 
 
+@shopkeeper_only
 async def cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     bill_id = query.data.split(":", 1)[1]
@@ -521,6 +629,7 @@ async def cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(CANCELLED.format(bill_id=bill_id))
 
 
+@shopkeeper_only
 async def day_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/summary or /report: today's bills, total and best sellers."""
     await send_day_summary(update.message)
@@ -607,13 +716,14 @@ async def start_bot():
         .build()
     )
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("myid", my_id))
     app.add_handler(CommandHandler(["summary", "report"], day_summary_command))
     app.add_handler(CommandHandler("add", add_items_command))
     app.add_handler(CallbackQueryHandler(cancel_button, pattern=r"^cancel:"))
-    app.add_handler(CallbackQueryHandler(confirm_button, pattern=r"^confirm:bill$"))
-    app.add_handler(CallbackQueryHandler(discard_button, pattern=r"^discard:bill$"))
-    app.add_handler(CallbackQueryHandler(confirm_items, pattern=r"^confirm:items$"))
-    app.add_handler(CallbackQueryHandler(discard_items, pattern=r"^discard:items$"))
+    app.add_handler(CallbackQueryHandler(confirm_button, pattern=r"^confirm:bill"))
+    app.add_handler(CallbackQueryHandler(discard_button, pattern=r"^discard:bill"))
+    app.add_handler(CallbackQueryHandler(confirm_items, pattern=r"^confirm:items"))
+    app.add_handler(CallbackQueryHandler(discard_items, pattern=r"^discard:items"))
     app.add_handler(MessageHandler(filters.PHOTO, photo))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_note))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
@@ -621,13 +731,16 @@ async def start_bot():
     await app.initialize()
     await app.start()
     await app.bot.set_my_commands([  # the "/" menu Telegram shows while typing
-        BotCommand("start", "Welcome / get a bill by ID"),
+        BotCommand("start", "Welcome"),
+        BotCommand("myid", "Show my Telegram ID (for SHOPKEEPER_IDS)"),
         BotCommand("summary", "ഇന്നത്തെ കണക്ക് · Today's report"),
         BotCommand("report", "Same as /summary"),
         BotCommand("add", "Add items: /add bread 45 piece, soap 40"),
     ])
     await app.updater.start_polling(drop_pending_updates=True)
     log.info("Telegram bot @%s is polling.", store.BOT_USERNAME or "?")
+    if not store.SHOPKEEPER_IDS:
+        log.warning("SHOPKEEPER_IDS is empty: nobody can bill yet. Send /myid to the bot and add it to .env.")
     return app
 
 

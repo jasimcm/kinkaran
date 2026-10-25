@@ -7,6 +7,7 @@ Prices are never decided here; store.price_items() looks them up in inventory.js
 import base64
 import json
 import logging
+import math
 import re
 
 import httpx
@@ -79,8 +80,11 @@ def clean_items(data):
     items = []
     for entry in data:
         item_id = str(entry.get("item_id", ""))
-        qty = float(entry.get("qty", 0))
-        if item_id not in store.INVENTORY_BY_ID or qty <= 0:
+        try:
+            qty = float(entry.get("qty", 0))
+        except (TypeError, ValueError):
+            continue
+        if item_id not in store.INVENTORY_BY_ID or not math.isfinite(qty) or qty <= 0:
             continue
         if store.INVENTORY_BY_ID[item_id]["unit"] in ("piece", "packet"):
             qty = max(1, round(qty))
@@ -134,6 +138,23 @@ name_ml is the Malayalam name; translate common grocery names, else reuse name_e
 NEW_ITEM_UNITS = {"kg", "litre", "piece", "packet"}
 
 
+def existing_item_id(name_en, name_ml):
+    """The price-list item with this exact name or alias ("Coconut Oil" -> coconut_oil), or None.
+    Re-adding an item must update its price, not create a second "Coconut Oil"."""
+    for name in (name_en, name_ml):
+        if name and name.lower() in ALIASES:
+            return ALIASES[name.lower()]
+    return None
+
+
+def new_item_id(name_en):
+    """An id in the same style as inventory.json (coconut_oil); Malayalam-only names get item_<code>."""
+    item_id = re.sub(r"[^a-z0-9]+", "_", name_en.lower()).strip("_")
+    if not item_id:
+        item_id = "item_" + base64.b32encode(name_en.encode()).decode().lower().rstrip("=")[:8]
+    return item_id
+
+
 def clean_new_items(data):
     """Keep only priced rows: a name, a positive price, a known unit. Builds the item id."""
     items = []
@@ -143,16 +164,15 @@ def clean_new_items(data):
             price = float(entry.get("price", 0) or 0)
         except (TypeError, ValueError):
             continue
-        if not name_en or price <= 0:
+        if not name_en or not math.isfinite(price) or price <= 0:
             continue
-        item_id = re.sub(r"[^a-z0-9]+", "-", name_en.lower()).strip("-")
-        if not item_id:  # Malayalam-only name
-            item_id = "item-" + base64.urlsafe_b64encode(name_en.encode()).decode().lower().rstrip("=")[:8]
+        name_ml = str(entry.get("name_ml", "")).strip()
+        item_id = existing_item_id(name_en, name_ml) or new_item_id(name_en)
         unit = str(entry.get("unit", "piece")).lower()
         items.append({
             "id": item_id,
             "name_en": name_en,
-            "name_ml": str(entry.get("name_ml", "")).strip() or name_en,
+            "name_ml": name_ml or name_en,
             "price": round(price, 2),
             "unit": unit if unit in NEW_ITEM_UNITS else "piece",
         })
@@ -185,9 +205,11 @@ def parse_items_text(text):
     return clean_new_items(data.get("items", []))
 
 
-# "add items", "new items", "പുതിയ സാധനം ചേർക്കൂ", "സാധനങ്ങൾ എഴുതി വെക്കൂ", "price list"
+# "add items", "new items", "പുതിയ സാധനം ചേർക്കൂ", "സാധനങ്ങൾ എഴുതി വെക്കൂ", "price list".
+# Not a bare "add" or "stock": "add 2 kg rice" and "2 soap, stock illa" are orders.
 ADD_ITEMS = re.compile(
-    r"^/?add\b|\bnew items?\b|\bprice[\s-]?list\b|\bstock\b|"
+    r"^/add\b|\badd\s+(?:new\s+)?(?:items?|stock|to\s+(?:the\s+)?price[\s-]?list)\b|\bnew\s+(?:items?|stock)\b|"
+    r"\bprice[\s-]?list\b|^stock\s+(?:update|add)|"
     r"സാധന\w*\s*ചേർ|സാധന\w*\s*എഴുതി|പുതിയ\s*സാധന|പുതിയ\s*സ്റ്റോക്ക്|വില\w*\s*ചേർ",
     re.IGNORECASE,
 )
@@ -431,9 +453,14 @@ SUMMARY_WORDS = re.compile(
 
 
 def is_summary(text):
-    """A short ask for the day's report, not a list of items. Capped at 6 words so an
-    "ആകെ"/"total" inside a long order still makes a bill instead of a report."""
-    return len(text.split()) <= 6 and bool(SUMMARY_WORDS.search(text))
+    """A short ask for the day's report, not an order: at most 6 words, no numbers and no
+    price-list items, so "1 kg rice total" or "അരി ആകെ 5 കിലോ" still make a bill."""
+    return (
+        len(text.split()) <= 6
+        and bool(SUMMARY_WORDS.search(text))
+        and not re.search(r"\d", text)
+        and not parse_locally(text)
+    )
 
 
 def wants_whatsapp(text):

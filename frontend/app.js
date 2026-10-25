@@ -30,6 +30,11 @@ function showError(message) {
   show("error", Boolean(message));
 }
 
+// Item names can be added by photo or voice, so never put them into HTML unescaped.
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
 function rupees(value) {
   return "₹" + Number(value).toFixed(2);
 }
@@ -59,7 +64,7 @@ async function init() {
     inventory.forEach((item) => (state.inventory[item.id] = item));
     $("shop-name").textContent = config.shop_name;
     $("add-select").innerHTML = inventory
-      .map((item) => `<option value="${item.id}">${item.name_ml} · ${item.name_en} (₹${item.price}/${UNIT_LABEL[item.unit]})</option>`)
+      .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name_ml)} · ${escapeHtml(item.name_en)} (₹${item.price}/${UNIT_LABEL[item.unit]})</option>`)
       .join("");
   } catch (error) {
     showError("Cannot reach the server. Is it running? / സെർവർ ലഭ്യമല്ല");
@@ -173,7 +178,7 @@ function renderBill() {
     const row = document.createElement("div");
     row.className = "bill-item";
     row.innerHTML = `
-      <div class="item-name">${item.name_ml}<small>${item.name_en} · ₹${item.price}/${UNIT_LABEL[item.unit]}</small></div>
+      <div class="item-name">${escapeHtml(item.name_ml)}<small>${escapeHtml(item.name_en)} · ₹${item.price}/${UNIT_LABEL[item.unit]}</small></div>
       <div class="item-total">${rupees(lineTotal)}</div>
       <div class="item-controls">
         <button class="qty-btn" data-action="minus" aria-label="Less">−</button>
@@ -238,13 +243,13 @@ function drawQr(elementId, text, fallback) {
   const element = $(elementId);
   element.innerHTML = "";
   if (!text) {
-    element.innerHTML = `<p class="qr-fallback">${fallback}</p>`;
+    element.innerHTML = `<p class="qr-fallback">${escapeHtml(fallback)}</p>`;
     return;
   }
   if (window.QRCode) {
     new QRCode(element, { text, width: 512, height: 512, correctLevel: QRCode.CorrectLevel.M });
   } else {
-    element.innerHTML = `<p class="qr-fallback">${text}</p>`;
+    element.innerHTML = `<p class="qr-fallback">${escapeHtml(text)}</p>`;
   }
 }
 

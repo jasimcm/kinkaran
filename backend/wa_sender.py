@@ -34,4 +34,8 @@ async def send_bill(bill):
     except httpx.HTTPError:
         raise SendError("the WhatsApp sender is not running")
     if response.status_code != 200:
-        raise SendError(response.json().get("error", f"error {response.status_code}"))
+        try:
+            reason = response.json().get("error")
+        except ValueError:  # not JSON (e.g. a proxy error page)
+            reason = None
+        raise SendError(reason or f"error {response.status_code}")

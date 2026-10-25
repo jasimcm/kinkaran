@@ -1,5 +1,6 @@
 """Shared config, inventory and bill storage (bills.json). Used by main.py and the bots."""
 import json
+import math
 import os
 import secrets
 import threading
@@ -56,6 +57,17 @@ WA_MIN_GAP_SECONDS = int(env("WA_MIN_GAP_SECONDS", "20"))
 # Public HTTPS address of this server (e.g. a Cloudflare tunnel), used for the PDF link in WhatsApp messages
 PUBLIC_URL = env("PUBLIC_URL").rstrip("/")
 
+# Who may use the bot as the shopkeeper: Telegram user ids (send /myid to the bot to see yours).
+# Everyone else can only fetch their own bill through the link on the counter screen.
+SHOPKEEPER_IDS = {int(part) for part in env("SHOPKEEPER_IDS").replace(" ", "").split(",") if part.isdigit()}
+# WhatsApp numbers (with 91) allowed to make bills through the optional WhatsApp Cloud API bot
+WHATSAPP_SHOPKEEPERS = {
+    "".join(ch for ch in part if ch.isdigit()) for part in env("WHATSAPP_SHOPKEEPERS").split(",") if part.strip()
+}
+# Secret for using the API through the public tunnel (the mic page on a phone). On this Mac
+# (localhost) no key is needed. Empty = the API is reachable only from this Mac.
+ACCESS_KEY = env("ACCESS_KEY")
+
 with open(INVENTORY_FILE, encoding="utf-8") as f:
     INVENTORY = json.load(f)
 INVENTORY_BY_ID = {item["id"]: item for item in INVENTORY}
@@ -68,9 +80,10 @@ def price_items(items):
     lines = []
     for entry in items:
         item = INVENTORY_BY_ID.get(entry["item_id"])
-        qty = round(float(entry["qty"]), 3)
-        if item is None or qty <= 0:
+        qty = float(entry["qty"])
+        if item is None or not math.isfinite(qty) or qty <= 0:  # NaN/inf would break bills.json
             continue
+        qty = round(qty, 3)
         lines.append({
             "item_id": item["id"],
             "name_en": item["name_en"],
@@ -92,16 +105,25 @@ def upi_link(bill):
 
 
 def telegram_link(bill):
-    if not BOT_USERNAME:
+    """Customer link: /start EB-0042_<key>. The key stops people fetching bills by guessing numbers."""
+    if not BOT_USERNAME or not bill.get("share_key"):
         return None
-    return f"https://t.me/{BOT_USERNAME}?start={bill['bill_id']}"
+    return f"https://t.me/{BOT_USERNAME}?start={bill['bill_id']}_{bill['share_key']}"
 
 
 def whatsapp_link(bill):
-    """Opens WhatsApp with "BILL EB-0042" typed in; the customer taps send and the bot replies."""
-    if not WHATSAPP_NUMBER:
+    """Opens WhatsApp with "BILL EB-0042 <key>" typed in; the customer taps send and the bot replies."""
+    if not WHATSAPP_NUMBER or not bill.get("share_key"):
         return None
-    return f"https://wa.me/{WHATSAPP_NUMBER}?text={quote('BILL ' + bill['bill_id'])}"
+    return f"https://wa.me/{WHATSAPP_NUMBER}?text={quote('BILL ' + bill['bill_id'] + ' ' + bill['share_key'])}"
+
+
+def bill_for_customer(bill_id, key):
+    """The bill if the customer's key matches it, else None (bills without a key are never shared)."""
+    bill = get_bill(bill_id)
+    if bill is None or not bill.get("share_key") or not secrets.compare_digest(bill["share_key"], key or ""):
+        return None
+    return bill
 
 
 def pdf_share_link(bill):
@@ -191,9 +213,8 @@ def add_item(entry):
     with _lock:
         item_id = entry["id"]
         existing = INVENTORY_BY_ID.get(item_id)
-        if existing is not None:  # re-adding an item updates its price
+        if existing is not None:  # re-adding an item updates only its price; the unit stays
             existing["price"] = float(entry["price"])
-            existing["unit"] = entry["unit"]
             item = existing
         else:
             item = {
@@ -227,10 +248,16 @@ def _save_bills(bills):
     tmp.replace(BILLS_FILE)
 
 
+def bill_number(bill_id):
+    """EB-0042 -> 42 (sort by this: as text, "EB-9999" comes after "EB-10000")."""
+    return int(bill_id.split("-")[1])
+
+
 def create_bill(lines, total, channel="web", transcript="", customer_phone=None):
     with _lock:
         bills = _load_bills()
-        bill_id = f"EB-{len(bills) + 1:04d}"
+        next_number = max(map(bill_number, bills), default=0) + 1  # never reuse a number
+        bill_id = f"EB-{next_number:04d}"
         bill = {
             "bill_id": bill_id,
             "share_key": secrets.token_urlsafe(8),
@@ -285,7 +312,20 @@ def whatsapp_send_times():
 def latest_bill():
     with _lock:
         bills = _load_bills()
-        return bills[max(bills)] if bills else None
+        return bills[max(bills, key=bill_number)] if bills else None
+
+
+def fail_stale_sends():
+    """At startup: WhatsApp countdowns don't survive a restart, so mark them failed
+    instead of leaving the counter screen on "Sending in 0 s…" forever."""
+    with _lock:
+        bills = _load_bills()
+        stale = [bill for bill in bills.values() if bill.get("send_status") == "pending"]
+        for bill in stale:
+            bill["send_status"] = "failed"
+        if stale:
+            _save_bills(bills)
+        return [bill["bill_id"] for bill in stale]
 
 
 def mark_delivered(bill_id, via):

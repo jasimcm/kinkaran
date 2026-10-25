@@ -16,8 +16,8 @@ What it takes to run this beyond the hackathon demo — in a real shop, every da
 
 | Gap | Risk | Fix |
 |---|---|---|
-| Anyone who finds the bot can bill | fake bills, price scraping | `OWNER_CHAT_ID` in `.env`; ignore all other chats (small change in `bot.py`) |
-| Bills are mutable-free but unauthenticated | guessing `/api/bills/EB-0001/pdf` | put `share_key` check on all bill routes; serve `/api` on localhost only |
+| ~~Anyone who finds the bot can bill~~ | — | **Done:** `SHOPKEEPER_IDS`; customers can only open their own bill |
+| ~~Bill endpoints unauthenticated~~ | — | **Done:** API is localhost-only or needs `ACCESS_KEY`; customer links carry the bill key |
 | `bills.json` / `inventory.json` flat files | corruption, no concurrent safety | SQLite (WAL) or Postgres; nightly backup to cloud/USB |
 | Payment not verified | "Paid via UPI" is asserted, not proven | Razorpay/Cashfree UPI QR + webhook, or PhonePe merchant API; print "PAID" only on confirm |
 | Gemini free tier | quota exhaustion mid-day | paid tier + daily quota alert; offline parser already covers typed text |
