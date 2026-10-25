@@ -22,12 +22,14 @@ import logging
 import math
 import re
 import time
+from datetime import datetime
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters,
+    Application, BaseUpdateProcessor, CallbackQueryHandler, CommandHandler, ContextTypes,
+    MessageHandler, filters,
 )
 
 import parser as bill_parser
@@ -149,6 +151,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------- Shopkeeper
 
 STALE_BUTTON = "This message is old or already used. Use the newest message. പുതിയ മെസേജ് ഉപയോഗിക്കൂ."
+
+NEXT_PHONE_SECONDS = 300  # a number said before the items is kept this long for the next draft
+
+
+def remember_next_phone(context, phone):
+    context.chat_data["next_phone"] = {"phone": phone, "at": time.time()}
+
+
+def take_next_phone(context):
+    """The number noted for the next customer, if it is still fresh. It is removed either way:
+    one noted number belongs to exactly one bill, so it can't drift onto a later customer."""
+    noted = context.chat_data.pop("next_phone", None)
+    if noted and time.time() - noted["at"] <= NEXT_PHONE_SECONDS:
+        return noted["phone"]
+    return None
 
 
 def new_draft_id(context):
@@ -376,7 +393,8 @@ async def make_bill(update, context, transcript, items, phone, unknown, icon):
             await update.message.reply_text(NOT_UNDERSTOOD.format(heard=transcript) + not_in_list)
         return
     lines, total = store.price_items(items)
-    phone = phone or context.chat_data.pop("next_phone", None)  # a number said before the items
+    noted = take_next_phone(context)  # always used up by this draft, even if it has its own number
+    phone = phone or noted
     draft_id = new_draft_id(context)
     context.chat_data["pending_draft"] = {  # nothing is billed until ✅ OK is tapped
         "id": draft_id, "lines": lines, "total": total, "transcript": transcript, "customer_phone": phone,
@@ -453,27 +471,31 @@ async def confirm_by_message(update, context):
     await finish_bill(update.message, context, draft)
 
 
+ASK_WINDOW_SECONDS = 600  # a bill older than this is never a candidate for a lone number
+
+
 async def attach_phone(update, context, phone, bill_id=None):
-    """A message with only a phone number. It belongs to:
+    """A message with only a phone number, and no draft open. It goes to:
     - the bill named in the message ("EB-0042 98470 12345"), or
-    - the last bill, if that bill has no customer yet or its WhatsApp send is still counting
-      down (then it's a correction), or else
-    - the NEXT bill: the last customer is done, so this is the next customer's number.
-      (Never overwrite a finished bill's customer: their bill would go to someone else.)"""
+    - the last bill while its WhatsApp countdown runs (correcting a misheard number), or
+    - if the last bill is recent and has no customer yet: ASK whether the number is for that
+      bill or for the next customer, or else
+    - the next bill (noted for 5 minutes).
+    It never guesses: a wrong guess sends one customer's bill to another."""
     if bill_id is None:
         last_id = context.chat_data.get("last_bill_id")
         if last_id is None:  # e.g. after a server restart: use the newest Telegram bill
             latest = store.latest_bill()
             last_id = latest["bill_id"] if latest and latest["channel"] == "telegram" else None
         last = store.get_bill(last_id) if last_id else None
-        if last is None or (last.get("customer_phone") and last_id not in PENDING):
-            context.chat_data["next_phone"] = phone
-            hint = f"\n(To change {last_id}'s number, send \"{last_id} {phone[2:]}\".)" if last else ""
-            await update.message.reply_text(
-                f"📲 {store.format_phone(phone)}: noted for the next bill. ഇനി സാധനങ്ങൾ പറയൂ.{hint}"
-            )
+        if last is not None and last_id in PENDING:
+            bill_id = last_id
+        elif last is not None and not last.get("customer_phone") and is_recent(last):
+            await ask_which_bill(update.message, last, phone)
             return
-        bill_id = last_id
+        else:
+            await note_for_next_bill(update.message, context, phone)
+            return
     if store.get_bill(bill_id) is None:
         await update.message.reply_text(f"Couldn't find bill {bill_id}. {bill_id} കണ്ടെത്താനായില്ല.")
         return
@@ -481,6 +503,51 @@ async def attach_phone(update, context, phone, bill_id=None):
     context.chat_data["last_bill_id"] = bill_id
     log.info("Customer %s added to %s", phone, bill_id)
     await deliver_to_customer(update.message, context, bill)
+
+
+def is_recent(bill):
+    age = time.time() - datetime.fromisoformat(bill["created_at"]).timestamp()
+    return age <= ASK_WINDOW_SECONDS
+
+
+async def note_for_next_bill(message, context, phone):
+    remember_next_phone(context, phone)
+    await message.reply_text(
+        f"📲 {store.format_phone(phone)}: noted for the next bill. ഇനി സാധനങ്ങൾ പറയൂ.\n"
+        f"(Send the items within {NEXT_PHONE_SECONDS // 60} minutes.)"
+    )
+
+
+async def ask_which_bill(message, bill, phone):
+    """The number could be for the bill just made (customer told it late) or for the next customer."""
+    await message.reply_text(
+        f"📲 {store.format_phone(phone)} — ഏത് ബില്ലിന്? Which bill is this number for?",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"{bill['bill_id']} (₹{bill['total']:.2f})", callback_data=f"phone:{bill['bill_id']}:{phone}"),
+            InlineKeyboardButton("🆕 Next customer", callback_data=f"phone:next:{phone}"),
+        ]]),
+    )
+
+
+@shopkeeper_only
+async def phone_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The answer to ask_which_bill."""
+    query = update.callback_query
+    _, target, phone = query.data.split(":")
+    await query.answer()
+    if target == "next":
+        await query.edit_message_text(f"📲 {store.format_phone(phone)} → next bill")
+        await note_for_next_bill(query.message, context, phone)
+        return
+    bill = store.get_bill(target)
+    if bill is None or bill.get("customer_phone"):  # meanwhile it got a number: don't overwrite
+        await query.edit_message_text(STALE_BUTTON)
+        return
+    bill = store.set_customer_phone(target, phone)
+    context.chat_data["last_bill_id"] = target
+    log.info("Customer %s added to %s", phone, target)
+    await query.edit_message_text(f"📲 {store.format_phone(phone)} → {target}")
+    await deliver_to_customer(query.message, context, bill)
 
 
 async def resend_bill(update, context, bill_id=None):
@@ -636,13 +703,21 @@ async def day_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def cancel_by_message(update, context):
-    """The shopkeeper typed or said "cancel" / "വേണ്ട"."""
-    bill_id = context.chat_data.get("pending_send")
-    status = cancel_send(bill_id)
-    if status:
-        await status.edit_text(CANCELLED.format(bill_id=bill_id))
+    """The shopkeeper typed or said "cancel" / "വേണ്ട". Stops EVERY WhatsApp countdown (safer than
+    guessing which one was meant), else discards the open draft; also forgets a noted number."""
+    stopped = []
+    for bill_id in list(PENDING):
+        status = cancel_send(bill_id)
+        if status:
+            stopped.append(bill_id)
+            await status.edit_text(CANCELLED.format(bill_id=bill_id))
+    forgot = context.chat_data.pop("next_phone", None) is not None
+    if stopped:
+        await update.message.reply_text(f"✋ Stopped: {', '.join(stopped)}. Nothing was sent.")
     elif context.chat_data.pop("pending_draft", None) is not None:
         await update.message.reply_text("✋ Discarded. ബിൽ ഉണ്ടായില്ല.")
+    elif forgot:
+        await update.message.reply_text("✋ Forgot the noted number.")
     else:
         await update.message.reply_text("Nothing to cancel. ഒന്നും അയക്കാനില്ല.")
 
@@ -701,6 +776,42 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------------------------------------------------- Start / stop
 
+def is_cancel_update(update):
+    """A Cancel tap, or a typed "cancel" / "വേണ്ട" (not voice: that needs Gemini first)."""
+    if not isinstance(update, Update):
+        return False
+    if update.callback_query is not None:
+        return (update.callback_query.data or "").startswith("cancel:")
+    message = update.message
+    return message is not None and bool(message.text) and bill_parser.is_cancel(message.text)
+
+
+class CancelFirst(BaseUpdateProcessor):
+    """Handle messages one at a time, in the order they arrive, EXCEPT cancels, which run at once.
+
+    A WhatsApp countdown runs on its own clock. If Cancel waited in line behind a voice note
+    being transcribed (up to 40 s) or a bill being printed, the bill would go to the wrong
+    number before the Cancel was even read."""
+
+    def __init__(self):
+        super().__init__(max_concurrent_updates=64)
+        self._in_order = None  # made inside the running event loop (Python 3.9 binds locks to a loop)
+
+    async def do_process_update(self, update, coroutine):
+        if is_cancel_update(update):
+            await coroutine
+            return
+        if self._in_order is None:
+            self._in_order = asyncio.Lock()  # first come, first served: keeps message order
+        async with self._in_order:
+            await coroutine
+
+    async def initialize(self):
+        pass
+
+    async def shutdown(self):
+        pass
+
 async def start_bot():
     """Start long polling. Returns the Application, or None if no token is configured."""
     if not store.TELEGRAM_BOT_TOKEN:
@@ -713,6 +824,7 @@ async def start_bot():
         .read_timeout(30)
         .write_timeout(30)
         .media_write_timeout(60)
+        .concurrent_updates(CancelFirst())
         .build()
     )
     app.add_handler(CommandHandler("start", start))
@@ -720,6 +832,7 @@ async def start_bot():
     app.add_handler(CommandHandler(["summary", "report"], day_summary_command))
     app.add_handler(CommandHandler("add", add_items_command))
     app.add_handler(CallbackQueryHandler(cancel_button, pattern=r"^cancel:"))
+    app.add_handler(CallbackQueryHandler(phone_choice, pattern=r"^phone:"))
     app.add_handler(CallbackQueryHandler(confirm_button, pattern=r"^confirm:bill"))
     app.add_handler(CallbackQueryHandler(discard_button, pattern=r"^discard:bill"))
     app.add_handler(CallbackQueryHandler(confirm_items, pattern=r"^confirm:items"))
@@ -737,7 +850,9 @@ async def start_bot():
         BotCommand("report", "Same as /summary"),
         BotCommand("add", "Add items: /add bread 45 piece, soap 40"),
     ])
-    await app.updater.start_polling(drop_pending_updates=True)
+    # Keep messages that arrived while the server was down (Telegram holds them for 24 h):
+    # a voice note sent during a restart or power cut is answered when the server is back.
+    await app.updater.start_polling(drop_pending_updates=False)
     log.info("Telegram bot @%s is polling.", store.BOT_USERNAME or "?")
     if not store.SHOPKEEPER_IDS:
         log.warning("SHOPKEEPER_IDS is empty: nobody can bill yet. Send /myid to the bot and add it to .env.")

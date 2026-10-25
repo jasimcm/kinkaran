@@ -4,8 +4,11 @@ What it takes to run this beyond the hackathon demo — in a real shop, every da
 
 ## What works today (already production-like)
 
-- **Unattended boot:** three launchd agents (`com.easybill.server`, `.whatsapp`, `.tunnel` in
-  `~/Library/LaunchAgents/`) start at login and auto-restart on crash (`KeepAlive`, 10s throttle).
+- **Unattended boot:** `scripts/install_launchd.sh` installs `com.kinkaran.server`, `.whatsapp` and `.tunnel`
+  in `~/Library/LaunchAgents/`. They start at login and restart on crash (`KeepAlive`, 10 s throttle).
+- **Nightly backup:** `com.kinkaran.backup` runs `scripts/backup.sh` at 23:30, keeping 30 copies in
+  `~/KinkaranBackups` (or `BACKUP_DIR`).
+- **Messages are never dropped:** anything sent while the Mac restarts is answered when it is back.
 - **Hands-free flow:** voice note → item preview → *"ശരി"*/OK → print + PDF + counter screen.
 - **Real printing:** `PRINT_PAPER=a4` on the HP Smart Tank (or `receipt` for 80mm thermal).
 - **WhatsApp sending:** linked spare number via `whatsapp-sender/` (auto-send with cancel window).
@@ -43,10 +46,12 @@ What it takes to run this beyond the hackathon demo — in a real shop, every da
    details, `UPI_VPA`, `PRINTER` (`lpstat -p`), `PRINT_PAPER=a4`.
 4. `chmod 600 .env`
 5. `cd whatsapp-sender && npm install && npm start` → link the spare phone once (QR).
-6. Install the three plists into `~/Library/LaunchAgents/` (update paths), then
-   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.easybill.*.plist`
+6. `scripts/install_launchd.sh` writes and loads the four agents with this folder's paths. It replaces
+   `./start.sh`, so don't run both. Remove them with `scripts/install_launchd.sh --uninstall`.
+   For an off-site copy, set `BACKUP_DIR` to a USB drive or an iCloud Drive folder.
 7. Smoke test: voice note → *"ശരി"* → paper prints → *"sales report"* → PDF. Try `/` menu.
-8. Failover drill: `kill` the server PID — watch it come back via `launchctl list | grep easybill`.
+8. Failover drill: `kill` the server PID, and watch it come back via `launchctl list | grep kinkaran`.
+9. Backup drill: `scripts/backup.sh`, then restore `bills.json` from `~/KinkaranBackups` (TEST_PLAN R4).
 
 ## Daily ops (shopkeeper, zero typing)
 

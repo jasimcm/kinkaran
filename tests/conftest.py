@@ -201,7 +201,10 @@ class Chat:
         handler = {
             "confirm:bill": bot.confirm_button, "discard:bill": bot.discard_button,
             "confirm:items": bot.confirm_items, "discard:items": bot.discard_items,
-        }.get(data.rsplit(":", 1)[0] if data.count(":") == 2 else data) or bot.cancel_button
+        }.get(data.rsplit(":", 1)[0] if data.count(":") == 2 else data)
+        if data.startswith("phone:"):
+            handler = bot.phone_choice
+        handler = handler or bot.cancel_button
         self.run(handler(update, self.context))
         return self.replies[-1] if self.replies else None
 

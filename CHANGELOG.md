@@ -3,6 +3,36 @@
 Record each meaningful project change, newest first. Use a real timestamp with timezone,
 for example `YYYY-MM-DDTHH:MM:SS+05:30`.
 
+## 2026-10-26T03:00:00+05:30 — Go-live fixes: right customer, no lost messages, backups, auto-start
+
+- Changed: `backend/bot.py`, `README.md`, `PRODUCTION.md`, `PRODUCTION_REVIEW.md`, `TEST_PLAN.md`.
+  Added: `scripts/backup.sh`, `scripts/install_launchd.sh`, `tests/test_production_fixes.py`.
+- Why: a second review found three ways a bill could still go to the wrong customer, two of them
+  introduced by the previous release's "next customer number" rule. Restarts also dropped messages, and
+  there were no backups or auto-start.
+- Details:
+  - **Cancel skips the queue.** Cancel taps and typed "cancel"/"വേണ്ട" skip the line (`CancelFirst`
+    update processor), so they never wait behind a voice note being transcribed while a WhatsApp
+    countdown runs. Other messages still run strictly in order.
+  - **A noted "next customer" number** is used up by the very next draft and expires after 5 minutes;
+    "cancel" forgets it.
+  - **A lone number** with a recent bill that has no customer: the bot asks "Which bill?" with
+    [EB-xxxx] / [🆕 Next customer] instead of guessing. Bills older than 10 minutes are never offered.
+  - **"cancel"** stops every running WhatsApp countdown, not only the newest.
+  - **Restarts:** `drop_pending_updates=False`, so messages sent during a restart are answered afterwards.
+  - **Backups:** `scripts/backup.sh` makes a dated copy (microsecond names), validates the JSON and keeps
+    30. A launchd agent runs it nightly at 23:30.
+  - **Auto-start:** `scripts/install_launchd.sh` installs server/whatsapp/tunnel agents (KeepAlive,
+    RunAtLoad) plus the backup. The WhatsApp sender runs in its own folder so it keeps its login.
+- Validation:
+  - `python -m pytest tests -q` → 151 passed (3 runs). There are new tests for each fix: the reviewer
+    scenarios, CancelFirst ordering, `start_polling(drop_pending_updates=False)`, backup rotation and
+    validation, and the plist contents.
+  - The plists pass `plutil -lint`.
+- Limitations:
+  - Not yet installed or tried on the shop Mac: run TEST_PLAN S5/F2/R4 there.
+  - Logs from launchd still aren't rotated.
+
 ## 2026-10-26T02:00:00+05:30 — Release hardening: shopkeeper lock, API lock, test suite
 
 - Changed: `backend/bot.py`, `backend/main.py`, `backend/store.py`, `backend/parser.py`,

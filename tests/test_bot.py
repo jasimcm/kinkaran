@@ -99,10 +99,12 @@ def test_number_while_draft_is_open(chat, fake_wa):
     assert store.latest_bill()["customer_phone"] == "917034191969"
 
 
-def test_number_after_the_bill(chat, fake_wa):
+def test_number_after_the_bill_asks_which_bill(chat, fake_wa):
     chat.say("2 kg rice")
     chat.press("confirm:bill")
-    chat.say("70341 91969")
+    assert "Which bill" in chat.say("70341 91969")
+    assert chat.buttons == ["phone:EB-0001:917034191969", "phone:next:917034191969"]
+    chat.press("phone:EB-0001")
     assert store.latest_bill()["customer_phone"] == "917034191969"
 
 

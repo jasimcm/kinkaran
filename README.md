@@ -154,6 +154,19 @@ Check the print queue with `lpstat -o`. The shopkeeper can also reprint by voice
 ```
 
 It keeps running after you close the Terminal. Logs are in `logs/`.
+
+**In the shop, use auto-start instead.** It restarts after a crash, starts at login, and backs up every night:
+
+```bash
+scripts/install_launchd.sh              # replaces ./start.sh; check with: launchctl list | grep kinkaran
+scripts/install_launchd.sh --uninstall  # remove
+```
+
+**Backups:** `scripts/backup.sh` copies `bills.json` and `inventory.json` to `~/KinkaranBackups`
+(or `BACKUP_DIR=/Volumes/USB/kinkaran`), checks the copies, and keeps the newest 30. It runs every night at
+23:30 under launchd. To restore, stop the server and copy both files from the newest backup folder
+into `backend/`.
+
 To run only the server and bot by hand instead:
 
 ```bash
