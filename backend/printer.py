@@ -4,6 +4,7 @@ Set PRINTER in .env:
   (empty)        save the PDF in backend/printed/ only
   preview        save it and open it in Preview (good for a demo with no printer)
   <printer name> send it to that printer with `lp`. List names with:  lpstat -p
+  remote         cloud server: queue it; the print helper on the shop Mac (print_agent/) prints it
 
 PRINT_PAPER picks the page:
   a4       the 80mm receipt at native size, centred on A4 (inkjet/laser like HP Smart Tank)
@@ -25,6 +26,11 @@ PRINTED_DIR = store.BACKEND_DIR / "printed"
 
 
 def print_bill(bill):
+    if store.PRINTER == "remote":  # cloud server: the shop's print helper picks it up
+        store.set_print_status(bill["bill_id"], "queued")
+        log.info("Queued %s for the shop printer", bill["bill_id"])
+        return "queued", None
+
     PRINTED_DIR.mkdir(exist_ok=True)
     path = PRINTED_DIR / f"EasyBill_{bill['bill_id']}.pdf"
 

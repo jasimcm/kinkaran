@@ -1,0 +1,12 @@
+# Nightly copy of bills.json and inventory.json (started by kinkaran-backup.timer)
+[Unit]
+Description=Kinkaran backup
+
+[Service]
+Type=oneshot
+User=kinkaran
+Group=kinkaran
+WorkingDirectory=/opt/kinkaran/app
+Environment=BACKUP_DIR=/opt/kinkaran/backups
+Environment=PYTHON=/opt/kinkaran/app/.venv/bin/python
+ExecStart=/bin/bash /opt/kinkaran/app/scripts/backup.sh

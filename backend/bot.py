@@ -735,6 +735,7 @@ async def print_again(update, context, bill_id=None):
         "printed": f"🖨️ {bill['bill_id']} sent to {store.PRINTER} (job {detail}). പ്രിന്റ് ആവുകയാണ്.",
         "preview": f"🖨️ {bill['bill_id']} opened in Preview.",
         "saved": f"🖨️ {bill['bill_id']} saved (no printer set).",
+        "queued": f"🖨️ {bill['bill_id']} sent to the shop printer. കടയിലെ പ്രിന്ററിലേക്ക് അയച്ചു.",
     }.get(mode, f"❌ {bill['bill_id']} print failed: {detail}")
     await update.message.reply_text(reply)
 
@@ -775,6 +776,22 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------- Start / stop
+
+APP = None  # the running Telegram Application, for messages the server sends on its own
+
+
+async def notify_shopkeepers(text):
+    """Message every shopkeeper (e.g. "EB-0042 didn't print"). Never raises: a failed alert must not
+    break the request that caused it."""
+    if APP is None:
+        log.warning("Not sent (bot not running): %s", text)
+        return
+    for user_id in store.SHOPKEEPER_IDS:
+        try:
+            await APP.bot.send_message(user_id, text)
+        except Exception as error:
+            log.error("Could not alert shopkeeper %s: %s", user_id, error)
+
 
 def is_cancel_update(update):
     """A Cancel tap, or a typed "cancel" / "വേണ്ട" (not voice: that needs Gemini first)."""
@@ -854,12 +871,16 @@ async def start_bot():
     # a voice note sent during a restart or power cut is answered when the server is back.
     await app.updater.start_polling(drop_pending_updates=False)
     log.info("Telegram bot @%s is polling.", store.BOT_USERNAME or "?")
+    global APP
+    APP = app
     if not store.SHOPKEEPER_IDS:
         log.warning("SHOPKEEPER_IDS is empty: nobody can bill yet. Send /myid to the bot and add it to .env.")
     return app
 
 
 async def stop_bot(app):
+    global APP
+    APP = None
     if app is None:
         return
     await app.updater.stop()

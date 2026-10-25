@@ -62,6 +62,10 @@ What it takes to run this beyond the hackathon demo — in a real shop, every da
 
 ## If it must move off the Mac
 
+**Done:** see [deploy/oracle/README.md](deploy/oracle/README.md). It covers an Oracle Always Free VM
+(systemd, Caddy HTTPS, nightly backup timer), with `PRINTER=remote` and the `print_agent/` helper on the
+shop Mac.
+
 The backend is plain FastAPI — runs on a Raspberry Pi / VPS unchanged. What must stay near the
 counter: the printer (CUPS/`lp`) and the counter screen. Cheapest real deployment: keep the Mac
 mini/Pi at the shop exactly as now; remote parts (Gemini, Telegram) are already cloud calls.

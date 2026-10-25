@@ -4,6 +4,7 @@ Run:  python backend/main.py   (then open http://localhost:8000)
 """
 import json
 import logging
+import os
 import secrets
 import sys
 from contextlib import asynccontextmanager
@@ -66,7 +67,8 @@ def is_local(request):
 
 
 def has_key(request, key):
-    return bool(store.ACCESS_KEY and key and secrets.compare_digest(key, store.ACCESS_KEY))
+    # compare bytes: compare_digest raises on non-ASCII text (a typo'd key must give 403, not 500)
+    return bool(store.ACCESS_KEY and key and secrets.compare_digest(key.encode(), store.ACCESS_KEY.encode()))
 
 
 @app.middleware("http")
@@ -180,23 +182,49 @@ def bill_status(bill_id: str):
 @app.get("/share/{bill_id}/{share_key}")
 def shared_pdf(bill_id: str, share_key: str):
     """The PDF link sent to customers on WhatsApp. Needs the bill's random key."""
-    bill = store.get_bill(bill_id)
-    if bill is None or not secrets.compare_digest(bill.get("share_key", ""), share_key):
+    if store.bill_for_customer(bill_id.upper(), share_key) is None:
         raise HTTPException(404, "Bill not found")
-    return bill_pdf(bill_id)
+    return bill_pdf(bill_id, paper="receipt")
 
 
 @app.post("/api/bills/{bill_id}/print")
 def print_again(bill_id: str):
     mode, detail = printer.print_bill(find_bill(bill_id))  # detail: CUPS job id, or the error
-    return {"printed": mode in ("printed", "preview"), "mode": mode, "detail": detail}
+    return {"printed": mode in ("printed", "preview", "queued"), "mode": mode, "detail": detail}
+
+
+# ---------------------------------------------------------------- Remote printing (PRINTER=remote)
+#
+# On a cloud server there is no printer. Bills are queued, and the print helper on the shop Mac
+# (print_agent/) asks for the queue every few seconds, prints each PDF with lp, and reports back.
+# Like all of /api, these need ACCESS_KEY when called from outside the server.
+
+class PrintResult(BaseModel):
+    ok: bool
+    detail: str = Field(default="", max_length=500)
+
+
+@app.get("/api/print-queue")
+def print_queue():
+    # queued_at tells a reprint ("print EB-0042" again) apart from the first print
+    return {"bills": [{"bill_id": bill["bill_id"], "queued_at": bill["print_updated_at"]} for bill in store.print_queue()]}
+
+
+@app.post("/api/bills/{bill_id}/printed")
+async def printed(bill_id: str, result: PrintResult):
+    find_bill(bill_id)
+    store.set_print_status(bill_id.upper(), "printed" if result.ok else "failed", result.detail or None)
+    if not result.ok:  # nobody watches a cloud server: tell the shopkeeper on Telegram
+        await bot.notify_shopkeepers(f"❌ {bill_id.upper()} didn't print at the shop: {result.detail or 'printer error'}.\n"
+                                     "Check the printer, then say \"print " + bill_id.upper() + "\".")
+    return {"ok": True}
 
 
 @app.get("/api/bills/{bill_id}/pdf")
-def bill_pdf(bill_id: str):
+def bill_pdf(bill_id: str, paper: str = Query("receipt", pattern="^(receipt|a4)$")):
     bill = find_bill(bill_id)
     return Response(
-        pdf_gen.build_pdf(bill),
+        pdf_gen.build_a4_pdf(bill) if paper == "a4" else pdf_gen.build_pdf(bill),
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="EasyBill_{bill["bill_id"]}.pdf"'},
     )
@@ -233,4 +261,5 @@ app.mount("/", StaticFiles(directory=store.FRONTEND_DIR, html=True), name="front
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # HOST=127.0.0.1 on a cloud server: only Caddy (HTTPS) in front of it can reach the app
+    uvicorn.run(app, host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8000")))

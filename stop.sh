@@ -1,6 +1,6 @@
 #!/bin/bash
 # Easy Bill: stop everything that start.sh started.
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 stop_port() {  # stop whatever is listening on this port (our server or the WhatsApp sender)
   local pids

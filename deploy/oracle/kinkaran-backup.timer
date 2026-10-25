@@ -1,0 +1,10 @@
+# Runs kinkaran-backup.service every night at 23:30 (server time zone: Asia/Kolkata)
+[Unit]
+Description=Nightly Kinkaran backup
+
+[Timer]
+OnCalendar=*-*-* 23:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

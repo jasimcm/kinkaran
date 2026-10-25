@@ -63,7 +63,8 @@ monitoring, and measured speech accuracy.
    These calls are synchronous inside the async server, so **the Telegram bot and every screen freeze while
    they run**. Fix: SQLite (WAL mode) with an index on bill number and date, run off the event loop.
    SQLite also gives atomic writes and easy backups.
-8. **Python 3.9 is end-of-life** (no security fixes since October 2025).
+8. **Python 3.9 is end-of-life** (no security fixes since October 2025). *(The Oracle deployment runs
+   Ubuntu 24.04's Python 3.12; the print helper on the Mac only needs the built-in python3.)*
    - ReportLab is already held below version 5 because of it.
    - Fix: install Python 3.12 (`brew install python@3.12`) and rebuild the venv. CI already tests 3.12.
 9. **Dependencies aren't locked.**
@@ -73,7 +74,8 @@ monitoring, and measured speech accuracy.
 10. **No monitoring.** If the bot dies at 9 am, the shopkeeper finds out from an angry customer.
     - Fix: a heartbeat (the bot messages the owner if it restarted), a `/health` endpoint, and an alert
       when printing or Gemini fails three times in a row.
-11. **Logs grow forever.** `logs/*.log` from `nohup` are never rotated. Fix: rotate daily with `newsyslog`.
+11. **Logs grow forever** on the Mac: `logs/*.log` are never rotated. Fix: rotate daily with `newsyslog`.
+    *(In the cloud, systemd's journal rotates logs automatically.)*
 12. **Drafts live only in memory.**
     - A restart between "2 kg rice" and "ശരി" loses the draft.
     - Fix: keep drafts in the database with a 30-minute expiry.
@@ -119,7 +121,7 @@ they are go-live blockers. Items 2 and 3 come from the release-hardening fix its
 | 7 | 🟠 | **Synchronous file I/O on the event loop** (see review item 7) | After about a year, every bill freezes the bot for about 1.8 s |
 | 8 | 🟠 | **Malayalam-only new item names collide on one id** | Adding "പരിപ്പ്" overwrites the price of "പഴം" (`item_4c2kvyfu` for both) |
 | 9 | 🟡 | **Editing a sent Telegram message crashes the handler** (`update.message` is None) | "Something went wrong"; the edit is ignored |
-| 10 | 🟡 | **A non-ASCII key gives a 500 error** (`compare_digest` on str) | `/share/EB-0001/é` → 500 instead of 404 |
+| 10 | ✅ | **Fixed: keys are compared as bytes.** Was: **A non-ASCII key gives a 500 error** (`compare_digest` on str) | `/share/EB-0001/é` → 500 instead of 404 |
 | 11 | 🟡 | **The draft is saved before its preview is sent** | A very long order exceeds Telegram's 4096-character limit, and a hidden draft can be confirmed with "ok" |
 | 12 | 🟡 | **The draft counter resets on restart; "ok" ignores draft ids** | An old OK button can confirm a new draft after a restart |
 | 13 | 🟡 | **The key cookie is always `Secure` off-localhost** | A second screen on plain-HTTP shop Wi-Fi can never log in |

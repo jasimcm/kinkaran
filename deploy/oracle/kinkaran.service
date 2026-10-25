@@ -1,0 +1,25 @@
+# Kinkaran billing server + Telegram bot (installed by deploy/oracle/setup.sh)
+[Unit]
+Description=Kinkaran billing server and Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kinkaran
+Group=kinkaran
+WorkingDirectory=/opt/kinkaran/app
+# Only Caddy (HTTPS) on this machine can reach the app; .env is read by the app itself
+Environment=HOST=127.0.0.1
+Environment=PORT=8000
+ExecStart=/opt/kinkaran/app/.venv/bin/python backend/main.py
+Restart=always
+RestartSec=5
+# The app may only write inside /opt/kinkaran
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/kinkaran
+
+[Install]
+WantedBy=multi-user.target

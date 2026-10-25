@@ -3,6 +3,54 @@
 Record each meaningful project change, newest first. Use a real timestamp with timezone,
 for example `YYYY-MM-DDTHH:MM:SS+05:30`.
 
+## 2026-10-26T04:00:00+05:30 — Cloud hosting: Oracle Always Free + print helper on the shop Mac
+
+- Added:
+  - `deploy/oracle/`: `setup.sh`, `move_from_mac.sh`, `kinkaran.service`, `kinkaran-backup.service`
+    and `.timer`, and `README.md`
+  - `print_agent/`: `print_agent.py` and `agent.env.example`
+  - `scripts/install_print_agent.sh` and `tests/test_cloud.py`
+- Changed:
+  - `backend/printer.py`, `store.py`, `main.py`, `bot.py`
+  - `.env.example`, `README.md`, `PRODUCTION.md`, `PRODUCTION_REVIEW.md`
+  - `start.sh`, `stop.sh` and `scripts/run_tunnel.sh` (ShellCheck fixes)
+- Why: to run the bot, API and backups on a free cloud VM with a fixed HTTPS address, while the
+  printer stays at the shop.
+- Details:
+  - **Queued printing:** `PRINTER=remote` queues bills instead of printing.
+    - `GET /api/print-queue` returns `queued_at`, so a reprint is told apart from the first print.
+    - `GET /api/bills/{id}/pdf?paper=a4`.
+    - `POST /api/bills/{id}/printed`. A failure messages the shopkeepers on Telegram.
+  - **Print helper:** uses only the standard library (runs on the Mac's built-in python3).
+    - Same `lp` options as `printer.py`.
+    - Retries with backoff.
+    - Never prints a request twice, even if its report was lost.
+    - `--check` tests the server, the key and the printer. A launchd agent runs it.
+  - **`setup.sh`** (Ubuntu 24.04) sets up:
+    - India time zone
+    - Python, git and Caddy, with automatic HTTPS for `DOMAIN`
+    - the user `kinkaran` and the app in `/opt/kinkaran/app`
+    - iptables rules for ports 80/443
+    - a hardened systemd service and the 23:30 backup timer
+
+    It starts the app only once `.env` exists. Safe to re-run to update.
+  - **`move_from_mac.sh`:** stops the Mac's bot before starting the cloud one (one poller only),
+    copies `.env` and data with `PRINTER=remote` and `PUBLIC_URL`, waits for HTTPS, and then sets up
+    the print helper.
+  - **Smaller changes:**
+    - `HOST`/`PORT` settings, so the cloud app listens on 127.0.0.1 only, behind Caddy.
+    - Keys are compared as bytes: non-ASCII gets 403/404, not 500 (review defect 10).
+- Validation:
+  - `python -m pytest tests -q` → 166 passed (3 runs). They include end-to-end runs of the real
+    helper against the real server over HTTP with a fake `lp`.
+  - `print_agent.py --check` against a dev server on this Mac and the real HP printer (status only,
+    nothing printed).
+  - ShellCheck reports no warnings in any script, and the plists pass `plutil -lint`.
+- Limitations:
+  - `setup.sh` has not yet been run on a real Oracle VM; Docker wasn't available to test it in an
+    Ubuntu container here.
+  - The print helper polls every 3 s.
+
 ## 2026-10-26T03:00:00+05:30 — Go-live fixes: right customer, no lost messages, backups, auto-start
 
 - Changed: `backend/bot.py`, `README.md`, `PRODUCTION.md`, `PRODUCTION_REVIEW.md`, `TEST_PLAN.md`.

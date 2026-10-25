@@ -3,7 +3,7 @@
 #   ./start.sh   WhatsApp sender + Cloudflare tunnel + server and Telegram bot (PUBLIC_URL is updated in .env)
 #   ./stop.sh    stop them all
 # Everything keeps running after you close the Terminal. Logs are in logs/.
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 mkdir -p logs
 ./stop.sh > /dev/null
 

@@ -3,7 +3,7 @@
 # The quick-tunnel URL changes every run, so this waits for the new URL, writes it to
 # PUBLIC_URL in .env, then restarts the server (launchd KeepAlive brings it back with
 # the fresh address, so WhatsApp PDF links keep working).
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 mkdir -p logs
 
 cloudflared tunnel --no-autoupdate --url http://localhost:8000 > logs/tunnel.log 2>&1 &

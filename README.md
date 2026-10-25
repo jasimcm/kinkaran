@@ -357,6 +357,16 @@ On WhatsApp the counter screen shows a `wa.me` QR. The customer sends "BILL EB-0
 The Cloud API bot needs `WHATSAPP_APP_SECRET` (webhook signatures are always checked), and only numbers in
 `WHATSAPP_SHOPKEEPERS` can make bills or see reports.
 
+## Run it in the cloud (free)
+
+Kinkaran also runs on a free **Oracle Cloud Always Free** VM, with automatic HTTPS. The bot then keeps
+billing when the shop's power or internet is down, and customer PDF links get a fixed address.
+The shop Mac only prints: `print_agent/` collects new bills from the cloud and prints them with `lp`.
+
+Step by step: **[deploy/oracle/README.md](deploy/oracle/README.md)**. In short:
+1. `sudo DOMAIN=myshop.duckdns.org bash setup.sh` on the VM.
+2. `deploy/oracle/move_from_mac.sh <ip> <domain>` on the Mac.
+
 ## Security
 
 | Who | Can do |

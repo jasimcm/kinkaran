@@ -121,7 +121,7 @@ def whatsapp_link(bill):
 def bill_for_customer(bill_id, key):
     """The bill if the customer's key matches it, else None (bills without a key are never shared)."""
     bill = get_bill(bill_id)
-    if bill is None or not bill.get("share_key") or not secrets.compare_digest(bill["share_key"], key or ""):
+    if bill is None or not bill.get("share_key") or not secrets.compare_digest(bill["share_key"].encode(), (key or "").encode()):
         return None
     return bill
 
@@ -296,6 +296,25 @@ def set_send_status(bill_id, status, send_at=None):
         bills[bill_id]["send_status"] = status
         bills[bill_id]["send_at"] = send_at
         _save_bills(bills)
+
+
+def set_print_status(bill_id, status, detail=None):
+    """Remote printing (PRINTER=remote): queued -> printed / failed, reported by the shop's print helper."""
+    with _lock:
+        bills = _load_bills()
+        bills[bill_id]["print_status"] = status
+        bills[bill_id]["print_detail"] = detail
+        bills[bill_id]["print_updated_at"] = datetime.now().isoformat(timespec="seconds")
+        _save_bills(bills)
+        return bills[bill_id]
+
+
+def print_queue():
+    """Bills waiting for the shop's print helper, oldest first."""
+    with _lock:
+        bills = _load_bills()
+    queued = [bill for bill in bills.values() if bill.get("print_status") == "queued"]
+    return sorted(queued, key=lambda bill: bill_number(bill["bill_id"]))
 
 
 def whatsapp_send_times():

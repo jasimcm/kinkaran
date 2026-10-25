@@ -7,3 +7,6 @@ backend/printed/
 whatsapp-sender/node_modules/
 whatsapp-sender/auth/
 logs/
+print_agent/agent.env
+print_agent/printed.json
+print_agent/printed.tmp
