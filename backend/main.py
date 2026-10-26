@@ -2,6 +2,7 @@
 
 Run:  python backend/main.py   (then open http://localhost:8000)
 """
+import asyncio
 import json
 import logging
 import os
@@ -37,13 +38,11 @@ async def lifespan(app):
     stale = store.fail_stale_sends()
     if stale:
         log.warning("WhatsApp countdowns lost in the restart, marked failed: %s", ", ".join(stale))
-    telegram_app = None
-    try:
-        telegram_app = await bot.start_bot()
-    except Exception as error:  # a bad token should not stop the web app
-        log.error("Could not start Telegram bot: %s", error)
+    started = {}  # filled in by the background task once the bot runs
+    starting = asyncio.create_task(bot.keep_starting_bot(lambda telegram_app: started.update(app=telegram_app)))
     yield
-    await bot.stop_bot(telegram_app)
+    starting.cancel()  # still retrying at shutdown: just stop trying
+    await bot.stop_bot(started.get("app"))
 
 
 app = FastAPI(title="Easy Bill", lifespan=lifespan)

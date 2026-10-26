@@ -858,24 +858,57 @@ async def start_bot():
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_note))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     app.add_error_handler(on_error)
-    await app.initialize()
-    await app.start()
-    await app.bot.set_my_commands([  # the "/" menu Telegram shows while typing
-        BotCommand("start", "Welcome"),
-        BotCommand("myid", "Show my Telegram ID (for SHOPKEEPER_IDS)"),
-        BotCommand("summary", "ഇന്നത്തെ കണക്ക് · Today's report"),
-        BotCommand("report", "Same as /summary"),
-        BotCommand("add", "Add items: /add bread 45 piece, soap 40"),
-    ])
-    # Keep messages that arrived while the server was down (Telegram holds them for 24 h):
-    # a voice note sent during a restart or power cut is answered when the server is back.
-    await app.updater.start_polling(drop_pending_updates=False)
+    try:
+        await app.initialize()
+        await app.start()
+        await app.bot.set_my_commands([  # the "/" menu Telegram shows while typing
+            BotCommand("start", "Welcome"),
+            BotCommand("myid", "Show my Telegram ID (for SHOPKEEPER_IDS)"),
+            BotCommand("summary", "ഇന്നത്തെ കണക്ക് · Today's report"),
+            BotCommand("report", "Same as /summary"),
+            BotCommand("add", "Add items: /add bread 45 piece, soap 40"),
+        ])
+        # Keep messages that arrived while the server was down (Telegram holds them for 24 h):
+        # a voice note sent during a restart or power cut is answered when the server is back.
+        await app.updater.start_polling(drop_pending_updates=False)
+    except Exception:
+        await shutdown_quietly(app)  # a half-started bot must not linger before the next try
+        raise
     log.info("Telegram bot @%s is polling.", store.BOT_USERNAME or "?")
     global APP
     APP = app
     if not store.SHOPKEEPER_IDS:
         log.warning("SHOPKEEPER_IDS is empty: nobody can bill yet. Send /myid to the bot and add it to .env.")
     return app
+
+
+async def shutdown_quietly(app):
+    """Undo whatever part of start_bot() succeeded. Errors here don't matter: we're giving up anyway."""
+    for step in (
+        app.updater.stop if app.updater and app.updater.running else None,
+        app.stop if app.running else None,
+        app.shutdown,
+    ):
+        if step is not None:
+            try:
+                await step()
+            except Exception:
+                pass
+
+
+async def keep_starting_bot(on_started, first_wait=5, longest_wait=60):
+    """Start the bot, and if that fails (no internet yet: the Mac just woke up or logged in), try
+    again after 5 s, 10 s, 20 s… up to once a minute, until it works. The server never runs
+    without the bot just because the network was slow to come up."""
+    wait = first_wait
+    while True:
+        try:
+            on_started(await start_bot())
+            return
+        except Exception as error:  # a timeout, no DNS, Telegram down…
+            log.error("Could not start Telegram bot (%s); trying again in %d s", error, wait)
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, longest_wait)
 
 
 async def stop_bot(app):

@@ -216,3 +216,59 @@ def test_launchd_agents(tmp_path):
     assert agents["com.kinkaran.tunnel"]["WorkingDirectory"] == str(ROOT)
     assert agents["com.kinkaran.backup"]["StartCalendarInterval"] == {"Hour": 23, "Minute": 30}
     assert "KeepAlive" not in agents["com.kinkaran.backup"]
+
+
+# ---------------------------------------------------------------- the bot starts even if the internet comes up late
+
+def test_bot_start_is_retried_until_it_works(monkeypatch):
+    """Real incident: the Mac woke at 10:46, the internet wasn't up yet, start_bot timed out once,
+    and the server ran all morning without the bot. Now it keeps trying."""
+    attempts, started = [], []
+
+    async def flaky_start_bot():
+        attempts.append(time.monotonic())
+        if len(attempts) < 3:
+            raise TimeoutError("Timed out")
+        return "telegram-app"
+
+    monkeypatch.setattr(bot, "start_bot", flaky_start_bot)
+    asyncio.run(bot.keep_starting_bot(started.append, first_wait=0.01, longest_wait=0.02))
+    assert len(attempts) == 3 and started == ["telegram-app"]
+
+
+def test_half_started_bot_is_cleaned_up(monkeypatch):
+    """If start_bot fails halfway (e.g. set_my_commands times out), it stops what it started."""
+    built = {}
+
+    class FakeBuilder:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: self
+
+        def build(self):
+            app = MagicMock()
+            app.initialize, app.start, app.stop, app.shutdown = AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock()
+            app.running, app.updater.running = True, False
+            app.bot.set_my_commands = AsyncMock(side_effect=TimeoutError("Timed out"))
+            built["app"] = app
+            return app
+
+    monkeypatch.setattr(store, "TELEGRAM_BOT_TOKEN", "1:test")
+    monkeypatch.setattr(bot.Application, "builder", lambda: FakeBuilder())
+    with pytest.raises(TimeoutError):
+        asyncio.run(bot.start_bot())
+    built["app"].stop.assert_awaited_once()
+    built["app"].shutdown.assert_awaited_once()
+    assert bot.APP is not built["app"]
+
+
+def test_server_works_while_the_bot_keeps_failing(monkeypatch):
+    import main
+    from fastapi.testclient import TestClient
+
+    async def no_internet():
+        raise OSError("nodename nor servname provided")
+
+    monkeypatch.setattr(bot, "start_bot", no_internet)
+    with TestClient(main.app, client=("127.0.0.1", 50000)) as client:  # runs startup and shutdown
+        assert client.get("/api/config").status_code == 200
+    # leaving the block shut the server down cleanly while the bot was still retrying
